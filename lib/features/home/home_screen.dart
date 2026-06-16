@@ -18,6 +18,7 @@ import '../convert_format/screen.dart';
 import '../print_template_edit/screen.dart';
 import '../photo_booth/screen.dart';
 import '../camera/screen.dart';
+import '../camera/unified_camera_screen.dart';
 import '../scanner/screen.dart';
 import '../editing_panel/photo_editor.dart';
 
@@ -116,27 +117,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                   const SizedBox(height: 24),
 
                   _ModeCard(
-                    icon: Icons.face_retouching_natural,
-                    title: 'Photo Booth',
-                    subtitle: 'Guided selfie with face & body detection',
-                    color: AppTheme.primary,
-                    onTap: () => _navigate(context, const GuidedCameraScreen()),
-                  ),
-                  const SizedBox(height: 8),
-                  _ModeCard(
                     icon: Icons.camera_alt,
                     title: 'Camera',
-                    subtitle: 'Standard point-and-shoot',
-                    color: AppTheme.secondary,
-                    onTap: () => _navigate(context, const PhotoCameraScreen()),
-                  ),
-                  const SizedBox(height: 8),
-                  _ModeCard(
-                    icon: Icons.document_scanner,
-                    title: 'Scan Photo',
-                    subtitle: 'Scan printed photos with auto-crop',
-                    color: AppTheme.accent,
-                    onTap: () => _navigate(context, const ScanCameraScreen()),
+                    subtitle: 'Standard, ID Photo & Scanner modes',
+                    color: AppTheme.primary,
+                    onTap: () => _navigate(context, const UnifiedCameraScreen()),
                   ),
 
                   const SizedBox(height: 8),
