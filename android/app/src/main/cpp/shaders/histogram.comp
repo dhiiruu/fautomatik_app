@@ -1,0 +1,44 @@
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuf { uint pixels[]; } inputBuf;
+layout(set = 0, binding = 1) writeonly buffer OutputBuf { uint bins[768]; } outputBuf; // 256 per channel (R, G, B)
+layout(set = 0, binding = 2) uniform Params { float _pad0; float _pad1; float _pad2; float _pad3; } params;
+
+// Shared memory for local histogram reduction
+shared uint localHist[768];
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint width = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint height = gl_NumWorkGroups.y * gl_WorkGroupSize.y;
+
+    // Initialize shared memory
+    for (uint i = gl_LocalInvocationID.x; i < 768; i += gl_WorkGroupSize.x) {
+        localHist[i] = 0;
+    }
+    barrier();
+
+    if (x < width && y < height) {
+        uint idx = y * width + x;
+        uint packed = inputBuf.pixels[idx];
+
+        uint r = (packed >> 24) & 0xFF;
+        uint g = (packed >> 16) & 0xFF;
+        uint b = (packed >> 8)  & 0xFF;
+
+        atomicAdd(localHist[r], 1u);
+        atomicAdd(localHist[256u + g], 1u);
+        atomicAdd(localHist[512u + b], 1u);
+    }
+    barrier();
+
+    // Write local histogram to output (workgroup reduces per-group)
+    // Note: this is per-workgroup. A full histogram needs a second pass
+    // that merges workgroup results. For now each workgroup writes its slice.
+    for (uint i = gl_LocalInvocationID.x; i < 768; i += gl_WorkGroupSize.x) {
+        atomicAdd(outputBuf.bins[i], localHist[i]);
+    }
+}

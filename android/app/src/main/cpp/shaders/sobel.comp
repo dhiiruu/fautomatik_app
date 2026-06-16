@@ -1,0 +1,52 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuf { uint pixels[]; } inputBuf;
+layout(set = 0, binding = 1) writeonly buffer OutputBuf { uint pixels[]; } outputBuf;
+layout(set = 0, binding = 2) uniform Params { float _pad0; float _pad1; float _pad2; float _pad3; } params;
+
+uint luminance(uint packed) {
+    uint r = (packed >> 24) & 0xFF;
+    uint g = (packed >> 16) & 0xFF;
+    uint b = (packed >> 8)  & 0xFF;
+    return (r * 77u + g * 150u + b * 29u) >> 8;
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint width = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint height = gl_NumWorkGroups.y * gl_WorkGroupSize.y;
+
+    if (x >= width || y >= height) return;
+
+    // 3x3 Sobel kernels
+    // Gx = [[-1,0,1], [-2,0,2], [-1,0,1]]
+    // Gy = [[-1,-2,-1], [0,0,0], [1,2,1]]
+    float gx = 0.0, gy = 0.0;
+
+    for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -1; dx <= 1; dx++) {
+            uint sx = uint(clamp(int(x) + dx, 0, int(width) - 1));
+            uint sy = uint(clamp(int(y) + dy, 0, int(height) - 1));
+            float lum = float(luminance(inputBuf.pixels[sy * width + sx]));
+
+            float kx = float(dx) * (dy == 0 ? 2.0 : 1.0);
+            float ky = float(dy) * (dx == 0 ? 2.0 : 1.0);
+
+            // Sobel x kernel
+            if (dx == -1) gx -= lum * (dy == 0 ? 2.0 : 1.0);
+            if (dx == 1)  gx += lum * (dy == 0 ? 2.0 : 1.0);
+            // Sobel y kernel
+            if (dy == -1) gy -= lum * (dx == 0 ? 2.0 : 1.0);
+            if (dy == 1)  gy += lum * (dx == 0 ? 2.0 : 1.0);
+        }
+    }
+
+    float mag = clamp(sqrt(gx * gx + gy * gy), 0.0, 255.0);
+    uint edge = uint(mag + 0.5);
+    uint a = inputBuf.pixels[y * width + x] & 0xFF;
+
+    outputBuf.pixels[y * width + x] = (edge << 24) | (edge << 16) | (edge << 8) | a;
+}

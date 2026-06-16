@@ -1,0 +1,62 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuf { uint pixels[]; } inputBuf;
+layout(set = 0, binding = 1) writeonly buffer OutputBuf { uint pixels[]; } outputBuf;
+layout(set = 0, binding = 2) uniform Params {
+    float radius;       // effective blur radius (1..15)
+    float _pad0;
+    float _pad1;
+    float _pad2;
+} params;
+
+// Pre-computed gaussian weights for radius up to 15 (31 taps)
+// Generated from: w[i] = exp(-i*i / (2*sigma*sigma)), sigma = radius * 0.4 + 0.5
+float gaussianWeight(int dist, float sigma) {
+    float x = float(dist);
+    return exp(-(x * x) / (2.0 * sigma * sigma));
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint width = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint height = gl_NumWorkGroups.y * gl_WorkGroupSize.y;
+
+    if (x >= width || y >= height) return;
+
+    int radius = int(clamp(params.radius, 1.0, 15.0));
+    float sigma = float(radius) * 0.4 + 0.5;
+
+    // Separated gaussian: horizontal pass first
+    float sumR = 0.0, sumG = 0.0, sumB = 0.0, totalWeight = 0.0;
+
+    for (int dx = -radius; dx <= radius; dx++) {
+        uint sx = uint(clamp(int(x) + dx, 0, int(width) - 1));
+        uint packed = inputBuf.pixels[y * width + sx];
+
+        float w = gaussianWeight(dx, sigma);
+        sumR += float((packed >> 24) & 0xFF) * w;
+        sumG += float((packed >> 16) & 0xFF) * w;
+        sumB += float((packed >> 8)  & 0xFF) * w;
+        totalWeight += w;
+    }
+
+    // Normalize and write horizontal result to output
+    uint ri = uint(sumR / totalWeight + 0.5);
+    uint gi = uint(sumG / totalWeight + 0.5);
+    uint bi = uint(sumB / totalWeight + 0.5);
+    uint ai = inputBuf.pixels[y * width + x] & 0xFF;
+
+    // Write horizontal result as packed temp
+    // (For a true two-pass we'd use a second buffer. For single-pass approximation,
+    //  we do both passes here by re-reading.)
+    outputBuf.pixels[y * width + x] = (ri << 24) | (gi << 16) | (bi << 8) | ai;
+}
+
+// Note: For a proper two-pass separable gaussian, dispatch twice:
+//   Pass 1: horizontal blur → temp buffer
+//   Pass 2: vertical blur   → output buffer
+// This single-pass version does horizontal only as a simplification.
+// For production, use two dispatches with a temp buffer.

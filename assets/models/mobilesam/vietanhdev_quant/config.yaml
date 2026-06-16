@@ -1,0 +1,8 @@
+type: segment_anything
+name: mobile_sam_20230629_quant
+display_name: Segment Anything (MobileSAM Quant)
+encoder_model_path: mobile_sam.encoder.quant.onnx
+decoder_model_path: sam_vit_h_4b8939.decoder.quant.onnx
+input_size: 1024
+max_width: 1024
+max_height: 682

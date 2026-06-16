@@ -1,0 +1,62 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// Input buffer layout:
+//   rows 0..H-1: source RGBA pixels
+//   row H:       mask bytes (GRAY8, 1 byte per pixel)
+layout(set = 0, binding = 0) readonly buffer InputBuf { uint data[]; } inputBuf;
+layout(set = 0, binding = 1) writeonly buffer OutputBuf { uint pixels[]; } outputBuf;
+layout(set = 0, binding = 2) uniform Params {
+    uint bgColor;        // 0xRRGGBB (alpha assumed 255)
+    float maskThreshold;
+    float featherRadius;
+    float _pad0;
+} params;
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint width = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint height = gl_NumWorkGroups.y * gl_WorkGroupSize.y;
+
+    if (x >= width || y >= height) return;
+
+    uint idx = y * width + x;
+    uint packed = inputBuf.data[idx];
+
+    uint srcR = (packed >> 24) & 0xFF;
+    uint srcG = (packed >> 16) & 0xFF;
+    uint srcB = (packed >> 8)  & 0xFF;
+    // srcA ignored — we use mask
+
+    // Mask is stored at row 'height' (0-indexed), offset by x
+    uint maskIdx = height * width + x;
+    float maskVal = float(inputBuf.data[maskIdx] & 0xFF) / 255.0;
+
+    // Soft threshold with feather
+    float alpha;
+    if (maskVal >= 1.0) {
+        alpha = 1.0;
+    } else if (maskVal <= maskThreshold) {
+        alpha = 0.0;
+    } else {
+        // Smoothstep between threshold and 1.0
+        float t = (maskVal - maskThreshold) / (1.0 - maskThreshold);
+        t = t * t * (3.0 - 2.0 * t); // smoothstep
+        alpha = t;
+    }
+
+    // Background color components
+    uint bgR = (params.bgColor >> 16) & 0xFF;
+    uint bgG = (params.bgColor >> 8) & 0xFF;
+    uint bgB = params.bgColor & 0xFF;
+
+    // Alpha blend: result = src * alpha + bg * (1 - alpha)
+    uint outR = uint(float(srcR) * alpha + float(bgR) * (1.0 - alpha) + 0.5);
+    uint outG = uint(float(srcG) * alpha + float(bgG) * (1.0 - alpha) + 0.5);
+    uint outB = uint(float(srcB) * alpha + float(bgB) * (1.0 - alpha) + 0.5);
+    uint outA = uint(255u);
+
+    outputBuf.pixels[idx] = (outR << 24) | (outG << 16) | (outB << 8) | outA;
+}
