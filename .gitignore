@@ -1,1 +1,25 @@
-Nothing should be ignored based on the provided file changes. The only added file is `qwen_understanding.md`, which appears to be a markdown documentation file and should not be ignored.
+```
+# Dependencies
+.pub/
+.dart_tool/
+build/
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+```
