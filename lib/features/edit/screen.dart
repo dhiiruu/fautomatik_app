@@ -11,15 +11,32 @@ import 'editor.dart';
 import 'config.dart';
 import '../print_template/screen.dart';
 
+class _BatchResult {
+  final String path;
+  final Uint8List? resultBytes;
+  final Uint8List? thumbnail;
+  final String? error;
+  _BatchResult(this.path, this.resultBytes, this.thumbnail, this.error);
+}
+
 mixin EditScreenMixin<T extends StatefulWidget> on State<T> {
   final ImagePicker _picker = ImagePicker();
   final PhotoEditor editor = PhotoEditor();
   final MediaPipeFacePipeline _facePipeline = MediaPipeFacePipeline();
 
+  // Single photo mode
   Uint8List? sourceBytes;
   int sourceW = 0;
   int sourceH = 0;
   Uint8List? resultBytes;
+
+  // Batch mode
+  List<String> _batchPaths = [];
+  int _batchIndex = 0;
+  List<_BatchResult> _batchResults = [];
+  bool _batchMode = false;
+  bool _batchProcessing = false;
+
   bool processing = false;
   bool pipelineLoading = true;
   String error = '';
@@ -51,26 +68,90 @@ mixin EditScreenMixin<T extends StatefulWidget> on State<T> {
     if (mounted) setState(() => pipelineLoading = false);
   }
 
-  Future<void> pickFromGallery() async {
+  Future<void> pickFromGallery({bool allowMulti = true}) async {
     HapticFeedback.lightImpact();
     try {
-      final file = await _picker.pickImage(source: ImageSource.gallery, imageQuality: null);
-      if (file == null) return;
-      await _loadFile(file);
+      if (allowMulti) {
+        final files = await _picker.pickMultiImage(imageQuality: null);
+        if (files.isEmpty) return;
+        if (files.length > 1) {
+          // Start batch mode
+          await _startBatch(files.map((f) => f.path).toList());
+          return;
+        }
+        // Single file
+        if (files.isNotEmpty) await _loadFile(files.first);
+      } else {
+        final file = await _picker.pickImage(source: ImageSource.gallery, imageQuality: null);
+        if (file == null) return;
+        await _loadFile(file);
+      }
     } catch (e) {
       if (mounted) setState(() => error = e.toString());
     }
   }
 
-  Future<void> captureFromCamera() async {
-    HapticFeedback.lightImpact();
-    try {
-      final file = await _picker.pickImage(source: ImageSource.camera, imageQuality: null);
-      if (file == null) return;
-      await _loadFile(file);
-    } catch (e) {
-      if (mounted) setState(() => error = e.toString());
+  Future<void> _startBatch(List<String> paths) async {
+    setState(() {
+      _batchMode = true;
+      _batchPaths = paths;
+      _batchIndex = 0;
+      _batchResults = [];
+      _batchProcessing = false;
+      sourceBytes = null;
+      resultBytes = null;
+    });
+  }
+
+  Future<void> _processBatch() async {
+    if (_batchProcessing || _batchPaths.isEmpty) return;
+    setState(() => _batchProcessing = true);
+
+    for (int i = _batchIndex; i < _batchPaths.length; i++) {
+      if (!mounted) break;
+
+      final path = _batchPaths[i];
+      try {
+        final fileBytes = await XFile(path).readAsBytes();
+        final decoded = img.decodeImage(fileBytes);
+        if (decoded == null) {
+          _batchResults.add(_BatchResult(path, null, null, 'Decode failed'));
+          continue;
+        }
+
+        final rgba = rgbaBytes(fileBytes, decoded.width, decoded.height);
+        FaceData? faceData;
+        if (needsFace && !pipelineLoading) {
+          final faces = await _facePipeline.process(rgba, decoded.width, decoded.height);
+          faceData = faces.isNotEmpty ? faces.first : null;
+        }
+
+        final editConfig = buildEditConfig();
+        final result = await editor.edit(
+          sourceBytes: fileBytes,
+          sourceWidth: decoded.width,
+          sourceHeight: decoded.height,
+          faceData: faceData,
+          config: editConfig,
+        );
+
+        _batchResults.add(_BatchResult(path, result, Uint8List(4), null));
+
+        // Clear memory immediately
+        resultBytes = null;
+        sourceBytes = null;
+
+        setState(() => _batchIndex = i + 1);
+
+        // Allow UI to breathe
+        await Future.delayed(Duration.zero);
+      } catch (e) {
+        _batchResults.add(_BatchResult(path, null, null, e.toString()));
+        setState(() => _batchIndex = i + 1);
+      }
     }
+
+    if (mounted) setState(() => _batchProcessing = false);
   }
 
   Future<void> _loadFile(XFile file) async {
@@ -194,28 +275,153 @@ mixin EditScreenMixin<T extends StatefulWidget> on State<T> {
               child: GradientButton(
                 icon: Icons.photo_library,
                 label: 'Select from Gallery',
-                onPressed: pickFromGallery,
-              ),
-            ),
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: captureFromCamera,
-                icon: const Icon(Icons.camera_alt, size: 20),
-                label: const Text('Open Camera'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: Colors.white,
-                  side: const BorderSide(color: Colors.white24),
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-                ),
+                onPressed: () => pickFromGallery(allowMulti: true),
               ),
             ),
           ],
         ),
       ),
     );
+  }
+
+  Widget _buildBatchView() {
+    final total = _batchPaths.length;
+    final processed = _batchResults.length;
+    final progress = total > 0 ? processed / total : 0.0;
+
+    return Padding(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Batch Processing', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.white)),
+              Text('$processed / $total', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 14)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          LinearProgressIndicator(
+            value: progress,
+            backgroundColor: AppTheme.surfaceBorder,
+            valueColor: const AlwaysStoppedAnimation<Color>(AppTheme.primary),
+            minHeight: 6,
+            borderRadius: BorderRadius.circular(3),
+          ),
+          const SizedBox(height: 20),
+          if (_batchProcessing) ...[
+            const Row(children: [
+              SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, valueColor: AlwaysStoppedAnimation<Color>(AppTheme.primary))),
+              SizedBox(width: 12),
+              Text('Processing...', style: TextStyle(color: AppTheme.textSecondary, fontSize: 13)),
+            ]),
+          ],
+          const SizedBox(height: 20),
+          Expanded(
+            child: GridView.builder(
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 4,
+                crossAxisSpacing: 8,
+                mainAxisSpacing: 8,
+                childAspectRatio: 1,
+              ),
+              itemCount: _batchResults.length,
+              itemBuilder: (ctx, i) {
+                final result = _batchResults[i];
+                return Container(
+                  decoration: BoxDecoration(
+                    color: AppTheme.surface,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: result.error != null ? Colors.red.withOpacity(0.5) : AppTheme.surfaceBorder),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: result.resultBytes != null
+                      ? Image.memory(result.resultBytes!, fit: BoxFit.cover)
+                      : Center(child: Icon(Icons.error, color: Colors.red, size: 20)),
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              if (!_batchProcessing && processed < total)
+                Expanded(
+                  child: GradientButton(
+                    icon: Icons.play_arrow,
+                    label: processed > 0 ? 'Resume' : 'Start',
+                    onPressed: _processBatch,
+                  ),
+                ),
+              if (_batchProcessing)
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => setState(() => _batchProcessing = false),
+                    icon: const Icon(Icons.pause),
+                    label: const Text('Pause'),
+                    style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white24)),
+                  ),
+                ),
+              if (processed == total) ...[
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: GradientButton(
+                    icon: Icons.save,
+                    label: 'Save All',
+                    onPressed: _saveAllBatch,
+                  ),
+                ),
+              ],
+              const SizedBox(width: 12),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () => setState(() {
+                    _batchMode = false;
+                    _batchPaths = [];
+                    _batchResults = [];
+                    _batchIndex = 0;
+                    sourceBytes = null;
+                    resultBytes = null;
+                  }),
+                  icon: const Icon(Icons.close),
+                  label: const Text('Close'),
+                  style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white24)),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _saveAllBatch() async {
+    HapticFeedback.mediumImpact();
+    final granted = await Gal.requestAccess();
+    if (!granted) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Gallery access denied')));
+      }
+      return;
+    }
+
+    int saved = 0;
+    for (final result in _batchResults) {
+      if (result.resultBytes != null && mounted) {
+        try {
+          await Gal.putImageBytes(result.resultBytes!, name: 'batch_${DateTime.now().millisecondsSinceEpoch}_$saved');
+          saved++;
+        } catch (_) {}
+      }
+    }
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Saved $saved images to gallery'), duration: const Duration(seconds: 2)),
+      );
+    }
   }
 
   Widget buildEditView() {
@@ -370,6 +576,7 @@ mixin EditScreenMixin<T extends StatefulWidget> on State<T> {
 
   Widget buildBody() {
     if (error.isNotEmpty) return buildError();
+    if (_batchMode) return _buildBatchView();
     if (sourceBytes == null) return buildSourcePicker();
     return buildEditView();
   }
