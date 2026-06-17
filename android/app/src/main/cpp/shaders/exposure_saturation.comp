@@ -1,0 +1,97 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) readonly buffer InputBuf { uint pixels[]; } inputBuf;
+layout(set = 0, binding = 1) writeonly buffer OutputBuf { uint pixels[]; } outputBuf;
+layout(set = 0, binding = 2) uniform Params {
+    float exposure;       // -2.0 to 2.0 (EV stops)
+    float saturation;     // -1.0 to 1.0 (desaturate to oversaturate)
+    float vibrance;       // -1.0 to 1.0 (smart saturation)
+    float _pad0;
+} params;
+
+float srgbToLinear(float v) {
+    if (v <= 0.04045) return v / 12.92;
+    return pow((v + 0.055) / 1.055, 2.4);
+}
+
+float linearToSrgb(float v) {
+    if (v <= 0.0031308) return v * 12.92;
+    return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    uint width = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    uint height = gl_NumWorkGroups.y * gl_WorkGroupSize.y;
+
+    if (x >= width || y >= height) return;
+
+    uint idx = y * width + x;
+    uint packed = inputBuf.pixels[idx];
+
+    float r = float((packed >> 24) & 0xFF) / 255.0;
+    float g = float((packed >> 16) & 0xFF) / 255.0;
+    float b = float((packed >> 8)  & 0xFF) / 255.0;
+    float a = float(packed & 0xFF) / 255.0;
+
+    // Convert to linear space for exposure
+    r = srgbToLinear(r);
+    g = srgbToLinear(g);
+    b = srgbToLinear(b);
+
+    // Exposure: multiply by 2^EV (EV = exposure value in stops)
+    float exposureFactor = pow(2.0, params.exposure);
+    r *= exposureFactor;
+    g *= exposureFactor;
+    b *= exposureFactor;
+
+    // Clamp to prevent HDR overflow before saturation
+    r = clamp(r, 0.0, 10.0);
+    g = clamp(g, 0.0, 10.0);
+    b = clamp(b, 0.0, 10.0);
+
+    // Saturation & Vibrance
+    // Luminance (perceived brightness)
+    float lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    
+    // Vibrance: selectively saturate less-saturated colors
+    // Calculate current saturation level
+    float maxChannel = max(max(r, g), b);
+    float minChannel = min(min(r, g), b);
+    float currentSat = maxChannel > 0.0 ? (maxChannel - minChannel) / maxChannel : 0.0;
+    
+    // Vibrance factor: boost less saturated colors more
+    float vibranceFactor = 1.0 - currentSat;
+    float effectiveVibrance = params.vibrance * vibranceFactor;
+    
+    // Combine saturation and vibrance
+    float satAdjust = params.saturation + effectiveVibrance;
+    
+    // Mix between luminance and original color based on saturation adjustment
+    // satAdjust > 0: increase saturation (move away from gray)
+    // satAdjust < 0: decrease saturation (move toward gray)
+    float satFactor = 1.0 + satAdjust;
+    r = mix(lum, r, satFactor);
+    g = mix(lum, g, satFactor);
+    b = mix(lum, b, satFactor);
+
+    // Clamp to valid range
+    r = clamp(r, 0.0, 1.0);
+    g = clamp(g, 0.0, 1.0);
+    b = clamp(b, 0.0, 1.0);
+
+    // Convert back to sRGB
+    r = linearToSrgb(r);
+    g = linearToSrgb(g);
+    b = linearToSrgb(b);
+
+    uint ri = uint(r * 255.0 + 0.5);
+    uint gi = uint(g * 255.0 + 0.5);
+    uint bi = uint(b * 255.0 + 0.5);
+    uint ai = uint(a * 255.0 + 0.5);
+
+    outputBuf.pixels[idx] = (ri << 24) | (gi << 16) | (bi << 8) | ai;
+}
